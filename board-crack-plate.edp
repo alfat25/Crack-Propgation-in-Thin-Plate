@@ -1,0 +1,196 @@
+load "plotPDF"
+load "msh3"
+load "iovtk"
+load "tetgen"
+load "mshmet"
+load "mmg"
+
+
+//Domain Setting
+int n=120;
+real xmin=-1.0, xmax=1.0;
+real ymin=-1.0, ymax=1.0;
+real ratio=(xmax-xmin)/(ymax-ymin);
+border a(t=0,1) { x= xmin+(xmax-xmin)*t; y=ymin               ; label=1;};//bottom
+border b(t=0,1) { x= xmax              ; y=ymin+(ymax-ymin)*t ; label=2;};//right
+border c(t=1,0) { x= xmin+(xmax-xmin)*t; y=ymax               ; label=3;};//top
+border d(t=1,0) { x= xmin              ; y=ymin+(ymax-ymin)*t ; label=4;};//left
+mesh th = buildmesh(a(n*ratio)+b(n*ratio)+c(n*ratio)+d(n*ratio));  
+meshS Th=movemesh23(th,transfo=[x,y,z]);
+plot(Th);
+
+
+//Physical Parameter
+real E = 50;
+real sigma = 0.29;
+real mu = E/(2*(1+sigma));
+real lambda = E*sigma/((1+sigma)*(1-2*sigma));
+real g01 = 0.0, g02=0.0, g03=6.0;
+real eps=1.0e-2;
+real gamma=0.5;
+real lerr = 2.5e-3;
+
+//Time Setting
+real dt=1e-4;
+real alp2=1.0e-2;
+real ra2dt=dt/alp2;
+int itmax=1000;
+int itplot=itmax/50;
+int itps=itmax/20;
+real t;
+
+
+//Initial Crack Setting
+real delta=1.e-2;
+real rdlt=1.0/delta;
+real rdlt2=rdlt*rdlt;
+real xs0=-0.2;
+real ys0=0.0;
+func zz0 = exp(-(y-ys0) * (y-ys0) *rdlt2) / (1.0 + exp((x-xs0)*rdlt)); 
+
+
+// parameter for adaptmesh()
+int adaptnbvx=100000; 	// max(#vertex)
+real adapthmin=1.0e-5; 	// min(h)
+real adapthmax=0.2; 		// max(h)
+
+
+fespace Vh2(Th,[P2,P2,P2]);
+Vh2 [u1,u2,u3], [v1,v2,v3];
+fespace Mh(Th,[P1,P1,P1,P1,P1,P1]);
+fespace Vh1(Th,P2);
+Vh1 pz, pzz, pzold, u1old, u2old, u3old;
+Mh [m11,m21,m22,m31,m32,m33];
+
+cout << "Th.nt=" << Th.nt << "Th.nv=" << Th.nv << "Vh1.ndof=" << Vh1.ndof << endl;
+cout << "lambda,mu ="<<lambda<< " " << mu << endl;
+
+
+//Macro Setting
+real sqrt2=sqrt(2.);
+macro PZ(z) ((1-z)*(1-z))																													//EOM
+macro Dzy(u2,u3) ((dz(u2)+dy(u3))/sqrt2)																					//EOM
+macro Dzx(u1,u3) ((dz(u1)+dx(u3))/sqrt2)																					//EOM
+macro Dyx(u1,u2) ((dy(u1)+dx(u2))/sqrt2)																					//EOM
+macro epsilon(u1,u2,u3)  [dx(u1),dy(u2),dz(u3),Dzy(u2,u3),Dzx(u1,u3),Dyx(u1,u2)] 	//EOM
+macro div(u1,u2,u3) (dx(u1)+dy(u2)+dz(u3)) 																				//EOM
+macro we0(u1,u2,u3) ((lambda*div(u1,u2,u3)*div(u1,u2,u3)
+										+mu*(epsilon(u1,u2,u3)'*epsilon(u1,u2,u3)))) 									//EOM
+macro ws(pz) (eps*(dx(pz)*dx(pz)+dy(pz)*dy(pz)+dz(pz)*dz(pz))+pz*pz/eps) 					//EOM
+macro tmod(t) (t) 																																//EOM
+
+
+real cpu=clock();
+
+
+//Weak Form
+problem Lame0([u1,u2,u3],[v1,v2,v3],solver=CG)
+	= int2d(Th)(PZ(pzold) * (lambda*div(u1,u2,u3)*div(v1,v2,v3)	
+							+ 2.*mu*( epsilon(u1,u2,u3)'*epsilon(v1,v2,v3) )))
+	+ on(1,u1=-g01*t,u2=-g02*t,u3=-g03*tmod(t))
+	+ on(3,u1=g01*t,u2=g01*t,u3=g03*tmod(t))
+	;
+
+
+problem Crackz1(pz,pzz,solver=CG)
+	= int2d(Th)(pz*pzz + ra2dt*eps*gamma*(dx(pz)*dx(pzz)+dy(pz)*dy(pzz)+dz(pz)*dz(pzz)))
+	+ int2d(Th)(ra2dt*(gamma/eps)*pz*pzz)
+	+ int2d(Th)(ra2dt*we0(u1old,u2old,u3old)*pz*pzz)
+	- int2d(Th)(pzold*pzz + ra2dt*we0(u1old,u2old,u3old)*pzz)
+	;
+
+
+//========================================================================
+// initial condition
+t=0.0;
+int it=0;
+pz = zz0; 
+
+
+plot(Th,pz,wait=0,value=1,cmm="z : t="+t+", u.max=("+u1[].max+","+u2[].max+")",ps="./Figure/mode1-2-"+it+".eps");
+plot(Th,pz,wait=0,value=1,cmm="z : t="+t,ps="./Figure/mode1-2-z-"+it+".eps");
+savevtk("./VTK/crack_"+it+".vtu",Th,pz,[u1,u2,u3],dataname="DamageVariabel");
+//plotPDF(Th,meshpage=1,index=0,isoline=0,value=0,fetype="P0","./PDFfile/Crack-Growth-MoveMesh"+it+".pdf");
+//plotPDF(pz,Th,meshpage=0,index=0,isoline=0,value=0,fetype="P2","./PDFfile/Crack-Growth"+it+".pdf");
+
+/*
+savemesh(Th,"./Data/Th-P2_"+it+".msh");
+{
+	ofstream file("./Data/u-P2_"+it+".dat");
+	file << u1[] << endl;
+}// close the file (end block)
+{
+	ofstream file("./Data/pz-P2_"+it+".dat");
+	file << pz[] << endl;
+}// close the file (end block)
+*/
+
+
+ofstream fout("./Energy/energy.dat");
+ofstream gout("./Energy/Tringales.dat");
+ofstream hout("./Energy/General.dat");
+
+real ene1=int2d(Th)(0.5*PZ(pz)*we0(u1,u2,u3)); 	//Elastic Energy
+real ene2=int2d(Th)(0.5*gamma*ws(pz));				//Surface Energy
+cout << "t=" << t << ", ene1=" << ene1 << ", ene2=" <<ene2 << endl;
+fout << t << ", " << ene1 << ", " << ene2 << ", " << tmod(t) << endl;
+gout << t << ", " << Th.nt << ", " << Th.nv << endl;
+
+
+//========================================================================
+//main loop
+for(it=1; it<=itmax; it++)
+{
+	t = dt*it;
+	u1old=u1; u2old=u2; u3old=u3; pzold=pz;
+	Lame0;
+	Crackz1; 
+	pz=max(pz,pzold);
+   
+//	Th=adaptmesh(Th,pz,nbvx=adaptnbvx,hmin=adapthmin,hmax=adapthmax);
+	//Adaptive 3D step iteration
+//	for(int ii=0; ii<5; ii++)
+//	{
+//  	[m11,m21,m22,m31,m32,m33]=[0,0,0,0,0,0];
+//  	real[int] met=mshmet(Th,pz,hmin=5.e-4,hmax=0.2,err=lerr,aniso=1);
+//  	m11[]=met;
+//  	Th=mmg3d(Th,metric=m11[],hgrad=2.3);
+//	}
+
+
+	//========================================================================
+	//Energy
+	cout << "it=" << it << ", t=" << t << endl;
+	ene1=int2d(Th)(0.5*PZ(pz)*we0(u1,u2,u3));	//Elastic Energy
+	ene2=int2d(Th)(0.5*gamma*ws(pz));				//Surface Energy
+	
+	cout << "t=" << t << ", ene1=" << ene1 << ", ene2=" <<ene2 << endl;
+	fout << t << ", " << ene1 << ", " << ene2 << ", " << tmod(t) << endl;
+	gout << t << ", " << Th.nt << ", " << Th.nv << endl;
+
+	//========================================================================
+	if(!(it % itps))
+	{
+		//plot(pz,wait=0,value=1,grey=0,cmm="z : t="+t,ps="./Figure/mode1-2-z-"+it+".eps");
+		//plotPDF(Th,meshpage=1,index=0,isoline=0,value=0,withmesh=0,fetype="P2","./PDFfile/Crack-Growth-MoveMesh"+it+".pdf");
+		//plotPDF(pz,Th,meshpage=0,index=0,isoline=0,value=0,fetype="P2","./PDFfile/Crack-Growth"+it+".pdf");
+		savevtk("./VTK/crack_"+it+".vtu",Th,pz,[u1,u2,u3],dataname="DamageVariabel");
+    /*
+    savemesh(Th,"./Data/Th-P2_"+it+".msh");
+    	{
+				ofstream file("./Data/u-P2_"+it+".dat");
+				file << u1[] << endl;
+			}// close the file (end block)
+			{
+				ofstream file("./Data/pz-P2_"+it+".dat");
+				file << pz[] << endl;
+			}// close the file (end block)
+			*/
+	}
+	
+		else
+		plot(pz,fill=1,value=1,cmm="z : t="+t+", u.max=("+u1[].max+","+u2[].max+")");
+		plot(u3,fill=1,value=1,cmm="z : t="+t+", u.max=("+u1[].max+","+u2[].max+")");
+}
+cout << "lambda,mu ="<<lambda<< " " << mu << endl;
+hout << (clock()-cpu) << " " << cpu << endl;
